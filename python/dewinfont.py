@@ -86,17 +86,48 @@ def savefont(f, file):
 	for i in range(256):
 		file.write("char " + "%d"%i + "\nwidth " + "%d"%f.chars[i].width+"\n")
 		if f.chars[i].width != 0:
-			for j in range(f.height):
-				v = f.chars[i].data[j]
-				m = 1 << (f.chars[i].width-1)
-				for k in range(f.chars[i].width):
-					if v & m:
-						file.write("x") #"1")
-					else:
-						file.write(".") #"0")
-					v = v << 1
-				file.write("\n")
+			if f.isvec:
+				d = f.chars[i].data
+				file.write('Data: ')
+				def fmt(b):
+					if b == 128: return 'up'
+					elif b > 128: return str(b - 256)
+					else: return str(b)
+				file.write(' '.join(map(fmt,d)))
+			else:
+				for j in range(f.height):
+					v = f.chars[i].data[j]
+					m = 1 << (f.chars[i].width-1)
+					for k in range(f.chars[i].width):
+						if v & m:
+							file.write("x") #"1")
+						else:
+							file.write(".") #"0")
+						v = v << 1
+					file.write("\n")
 		file.write("\n")
+
+"""
+0x00 WORD  dfVersion;
+0x02 DWORD dfSize;
+0x06 CHAR  dfCopyright[60];
+0x42 WORD  dfType; dfPoints; dfVertRes; dfHorizRes; dfAscent; dfInternalLeading;
+dfExternalLeading;
+0x50 BYTE  dfItalic; BYTE  dfUnderline; BYTE  dfStrikeOut;
+0x53 WORD  dfWeight;
+0x55 BYTE  dfCharSet;
+0x56 WORD  dfPixWidth; WORD  dfPixHeight;
+0x5e BYTE  dfPitchAndFamily;
+0x5f WORD  dfAvgWidth;
+0x61 WORD  dfMaxWidth;
+0x63 BYTE  dfFirstChar; BYTE  dfLastChar; BYTE  dfDefaultChar; BYTE  dfBreakChar;
+0x67 WORD  dfWidthBytes;
+0x69 DWORD dfDevice;
+0x6d DWORD dfFace;
+0x71 BitsPointer
+0x75 BitsOffset
+0x79 CharOffset
+"""
 
 def dofnt(fnt):
 	"Create an internal font description from a .FNT-shaped string."
@@ -104,9 +135,6 @@ def dofnt(fnt):
 	f.chars = [None] * 256
 	version = fromword(fnt[0:])
 	ftype = fromword(fnt[0x42:])
-	if ftype & 1:
-		sys.stderr.write("This font is a vector font\n")
-		return None
 	off_facename = fromdword(fnt[0x69:])
 	if off_facename < 0 or off_facename > len(fnt):
 		sys.stderr.write("Face name not contained within font data")
@@ -131,7 +159,21 @@ def dofnt(fnt):
 	#print "Attrs", f.italic, f.underline, f.strikeout, f.weight
 	#print "Charset", f.charset
 	# Read the char table.
-	if version == 0x200:
+	fixed_width = fromword(fnt[0x56:])
+	max_width = fromword(fnt[0x63:])
+	f.isvec = ftype & 1
+	if f.isvec:
+		sys.stderr.write("This font is a vector font. Support is EXPERIMENTAL.\n")
+		ctsize = 4
+		if fixed_width:
+			#sys.stderr.write("Fixed-pitch vector fonts not supported yet.\n")
+			ctsize = 2
+		if max(f.height, fixed_width, max_width) > 128:
+			sys.stderr.write("Large-grid vector fonts not supported yet.\n")
+			return None
+		ctstart = 0x75
+		btstart = fromdword(fnt[0x71:])
+	elif version == 0x200:
 		ctstart = 0x76
 		ctsize = 4
 	else:
@@ -141,27 +183,42 @@ def dofnt(fnt):
 	for i in range(256):
 		f.chars[i] = char()
 		f.chars[i].width = 0
-		f.chars[i].data = [0] * f.height
+		if not f.isvec:
+			f.chars[i].data = [0] * f.height
 	firstchar = frombyte(fnt[0x5F:])
 	lastchar = frombyte(fnt[0x60:])
-	for i in range(firstchar,lastchar+1):
-		entry = ctstart + ctsize * (i-firstchar)
-		w = fromword(fnt[entry:])
-		f.chars[i].width = w
-		if ctsize == 4:
-			off = fromword(fnt[entry+2:])
-		else:
-			off = fromdword(fnt[entry+2:])
-		#print "Char", i, "width", w, "offset", off, "filelen", len(fnt)
-		#widthbytes = (w + 7) / 8
-		widthbytes = (w + 7) // 8
-		for j in range(f.height):
-			for k in range(widthbytes):
-				bytepos = off + k * f.height + j
-				#print bytepos, "->", hex(frombyte(fnt[bytepos:]))
-				f.chars[i].data[j] = f.chars[i].data[j] << 8
-				f.chars[i].data[j] = f.chars[i].data[j] | frombyte(fnt[bytepos:])
-			f.chars[i].data[j] = f.chars[i].data[j] >> (8*widthbytes - w)
+	if f.isvec:
+		for i in range(firstchar,lastchar+1):
+			entry = ctstart + ctsize * (i-firstchar)
+			off1 = fromword(fnt[entry:])
+			off2 = fromword(fnt[entry+ctsize:])
+			if fixed_width:
+				w = fixed_width
+			else:
+				w = fromword(fnt[entry+2:])
+			f.chars[i].width = w
+			print("Char %r, off %d, len %d" % (chr(i), off1, off2-off1))
+			f.chars[i].data = fnt[btstart + off1 : btstart + off2]
+			# What they're doing down there doesn't look anything like what the SDK says, but what do i know
+	else:
+		for i in range(firstchar,lastchar+1):
+			entry = ctstart + ctsize * (i-firstchar)
+			w = fromword(fnt[entry:])
+			f.chars[i].width = w
+			if ctsize == 4:
+				off = fromword(fnt[entry+2:])
+			else:
+				off = fromdword(fnt[entry+2:])
+			#print "Char", i, "width", w, "offset", off, "filelen", len(fnt)
+			#widthbytes = (w + 7) / 8
+			widthbytes = (w + 7) // 8
+			for j in range(f.height):
+				for k in range(widthbytes):
+					bytepos = off + k * f.height + j
+					#print bytepos, "->", hex(frombyte(fnt[bytepos:]))
+					f.chars[i].data[j] = f.chars[i].data[j] << 8
+					f.chars[i].data[j] = f.chars[i].data[j] | frombyte(fnt[bytepos:])
+				f.chars[i].data[j] = f.chars[i].data[j] >> (8*widthbytes - w)
 	return f
 
 def nefon(fon, neoff):
